@@ -1,10 +1,12 @@
 from django.http import HttpResponseRedirect
+from django.http import JsonResponse
 
 from ..base_client import BaseApp
 from ..base_client import OAuth1Mixin
 from ..base_client import OAuth2Mixin
 from ..base_client import OAuthError
 from ..base_client import OpenIDMixin
+from ..base_client.backchannel import get_logout_token_from_form
 from ..requests_client import OAuth1Session
 from ..requests_client import OAuth2Session
 
@@ -100,6 +102,50 @@ class DjangoOAuth2App(DjangoAppMixin, OAuth2Mixin, OpenIDMixin, BaseApp):
 
         self.framework.clear_state_data(request.session, state)
         return state_data
+
+    def handle_backchannel_logout(self, request, on_logout):
+        """Handle an OIDC Back-Channel Logout request.
+
+        Register a Django view on the ``backchannel_logout_uri`` you gave to
+        the OpenID Provider, and call this method from it::
+
+            def backchannel_logout(request):
+                def clear_sessions(claims):
+                    if claims.get("sid"):
+                        clear_session_by_sid(claims["sid"])
+                    else:
+                        clear_user_sessions(claims["sub"])
+
+                return oauth.sso.handle_backchannel_logout(request, clear_sessions)
+
+        The logout token is verified with the OP JWKS, and all the checks of
+        the Back-Channel Logout specification are performed. ``on_logout`` is
+        then called with the validated claims. It receives a mapping with a
+        ``sub`` and/or a ``sid``:
+
+        - with a ``sid``, terminate the local session that carries this
+          session ID;
+        - without a ``sid``, terminate every local session of the user
+          identified by ``sub`` — this is the same account on all devices.
+
+        :param request: HTTP request instance from the Django view.
+        :param on_logout: A callable taking the validated logout token
+            claims. It performs the actual session cleanup.
+        :return: A Django ``JsonResponse``. ``200`` with an empty JSON object
+            on success, or the error response required by the specification
+            (``400``, ``401``, ``429`` or ``501``).
+        """
+        from authlib.oidc.backchannel.errors import BackchannelLogoutError
+
+        try:
+            logout_token = get_logout_token_from_form(request.POST)
+            claims = self.parse_logout_token(logout_token)
+            on_logout(claims)
+        except BackchannelLogoutError as error:
+            status, body, _headers = error()
+            return JsonResponse(body, status=status)
+
+        return JsonResponse({}, status=200)
 
     def authorize_access_token(self, request, **kwargs):
         """Fetch access token in one step.

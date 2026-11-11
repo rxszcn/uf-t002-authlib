@@ -63,6 +63,126 @@ this session. The OP creates a signed logout token for each of them.
    ``204 No Content`` instead. The RP answers ``400 Bad Request`` if the token
    is invalid or the logout failed.
 
+Receiving Logout Tokens (Relying Party)
+---------------------------------------
+
+When your application is the Relying Party, the OpenID Provider posts a
+logout token to your ``backchannel_logout_uri``. Authlib verifies the token
+and gives you its claims, so you only have to clear the matching sessions.
+
+The web framework integrations (Flask, Django and Starlette) expose a
+``handle_backchannel_logout`` method on the OAuth 2.0 app. It parses the
+form-encoded request, validates the logout token with the OP JWKS, calls your
+callback, and builds the response required by the specification.
+
+With Flask:
+
+.. skip: next
+
+.. code-block:: python
+
+    @app.route("/backchannel-logout", methods=["POST"])
+    def backchannel_logout():
+        def clear_sessions(claims):
+            if claims.get("sid") is not None:
+                # One OP session, possibly shared by several applications.
+                clear_session_by_sid(claims["sid"])
+            else:
+                # No sid: terminate every session of this user, on all devices.
+                clear_user_sessions(claims["sub"])
+
+        return oauth.sso.handle_backchannel_logout(clear_sessions)
+
+With Django, pass the request as the first argument::
+
+    def backchannel_logout(request):
+        return oauth.sso.handle_backchannel_logout(request, clear_sessions)
+
+With Starlette, the method is a coroutine and the callback may be async::
+
+    async def backchannel_logout(request):
+        return await oauth.sso.handle_backchannel_logout(request, clear_sessions)
+
+The callback receives the validated claims, a mapping with a ``sub`` and/or a
+``sid``:
+
+- **with a ``sid``**, terminate the local session that carries this session
+  ID. The same ``sid`` identifies one OP session shared by several RPs.
+- **without a ``sid``**, the token only carries a ``sub``: terminate every
+  local session of this user. This is how the same account is logged out on
+  all devices.
+
+Store the ``sid`` of each session when the user logs in. Authlib does not add
+the ``sid`` claim to ID tokens itself; read it from the ID token claims and
+persist it next to your local session.
+
+On success, the method answers ``200`` with an empty JSON object. All the
+validation errors are caught and turned into the response of §4.4:
+
+- ``400 Bad Request`` with ``invalid_request`` for a malformed token or an
+  invalid claim, including a missing ``logout_token`` parameter;
+- ``401 Unauthorized`` with ``invalid_token`` when the JWT cannot be parsed or
+  its signature cannot be verified;
+- ``429 Too Many Requests`` and ``501 Not Implemented`` are available as
+  :class:`LogoutTokenRateLimitedError` and
+  :class:`BackchannelLogoutUnsupportedError` if you need them.
+
+An exception raised by your callback is not converted to an error response:
+it propagates to the framework error handling. Do not clear the sessions
+before the token is fully validated.
+
+Logout Token Validation
+~~~~~~~~~~~~~~~~~~~~~~~
+
+The framework method uses :meth:`~authlib.integrations.base_client.OpenIDMixin.parse_logout_token`,
+which fetches the OP JWKS like ``parse_id_token`` and refreshes it once when
+the token references an unknown ``kid``. The token refresh and userinfo flows
+are unchanged.
+
+You can also validate a token directly with :func:`validate_logout_token`, for
+instance outside of a web framework:
+
+.. skip: next
+
+.. code-block:: python
+
+    from authlib.oidc.backchannel import validate_logout_token
+
+    claims = validate_logout_token(
+        logout_token,
+        key_set=op_jwks,
+        client_id="our-client-id",
+        issuer="https://provider.test",
+    )
+
+It performs every check of §2.6:
+
+- the signature is verified, and the ``none`` algorithm is rejected;
+- ``iss`` matches the OP issuer, and ``aud`` contains the RP ``client_id``;
+- ``iat``, ``exp`` and ``jti`` are present and the time claims are valid;
+- the ``events`` claim contains the
+  ``http://schemas.openid.net/event/backchannel-logout`` member with an empty
+  object;
+- the token contains a ``sub`` or a ``sid``, and no ``nonce``.
+
+Replay Protection
+~~~~~~~~~~~~~~~~~
+
+The specification requires the RP to reject a second logout token with the
+same ``jti``. Authlib cannot know where you store the processed tokens, so
+this check belongs to your callback. Keep the ``jti`` values for at least the
+token lifetime (two minutes by default) and ignore a duplicate:
+
+.. skip: next
+
+.. code-block:: python
+
+    def clear_sessions(claims):
+        if not jti_store.add(claims["jti"]):
+            # Already processed: nothing to do, still answer 200.
+            return
+        clear_session_by_sid(claims["sid"])
+
 Sending Logout Notifications
 -----------------------------
 
@@ -392,6 +512,12 @@ API Reference
 
 .. autofunction:: create_logout_token
 
+.. autofunction:: validate_logout_token
+
+.. autoclass:: LogoutTokenClaims
+    :member-order: bysource
+    :members:
+
 .. autoclass:: ClientMetadataClaims
     :member-order: bysource
     :members:
@@ -399,3 +525,13 @@ API Reference
 .. autoclass:: OpenIDProviderMetadata
     :member-order: bysource
     :members:
+
+.. autoexception:: BackchannelLogoutError
+
+.. autoexception:: InvalidLogoutTokenError
+
+.. autoexception:: InvalidLogoutTokenSignatureError
+
+.. autoexception:: LogoutTokenRateLimitedError
+
+.. autoexception:: BackchannelLogoutUnsupportedError

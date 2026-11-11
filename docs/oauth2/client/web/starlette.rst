@@ -169,6 +169,39 @@ The ``logout_redirect`` method accepts:
     The ``id_token`` is available in ``token['id_token']`` after calling
     ``authorize_access_token()``.
 
+Back-Channel Logout
+-------------------
+
+`OpenID Connect Back-Channel Logout`_ lets the provider terminate your local
+sessions with a direct server-to-server request, without a browser redirect.
+Register a route on your ``backchannel_logout_uri`` and await
+``handle_backchannel_logout``. The callback may be a regular or an async
+function:
+
+.. skip: next "fragment of the logout view"
+
+.. code-block:: python
+
+    async def backchannel_logout(request):
+        def clear_sessions(claims):
+            if claims.get('sid') is not None:
+                clear_session_by_sid(claims['sid'])
+            else:
+                clear_user_sessions(claims['sub'])
+
+        return await oauth.google.handle_backchannel_logout(
+            request, clear_sessions
+        )
+
+    app.add_route('/backchannel-logout', backchannel_logout, methods=['POST'])
+
+The logout token is verified with the provider JWKS before the callback runs.
+The callback clears one session with ``sid``, or every session of the user
+with ``sub``. Validation errors produce the ``400`` and ``401`` responses of
+the specification. See :ref:`specs/backchannel` for the full reference.
+
+.. _OpenID Connect Back-Channel Logout: https://openid.net/specs/openid-connect-backchannel-1_0.html
+
 Examples
 --------
 

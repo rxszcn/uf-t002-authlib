@@ -5,6 +5,8 @@ from joserfc.jws import JWSRegistry
 
 from authlib.common.security import generate_token
 from authlib.common.urls import add_params_to_uri
+from authlib.oidc.backchannel.validator import LogoutTokenClaims
+from authlib.oidc.backchannel.validator import validate_logout_token
 from authlib.oidc.core import CodeIDToken
 from authlib.oidc.core import ImplicitIDToken
 from authlib.oidc.core import UserInfo
@@ -130,3 +132,50 @@ class AsyncOpenIDMixin:
 
         url = add_params_to_uri(end_session_endpoint, params)
         return {"url": url, "state": state}
+
+    async def parse_logout_token(
+        self,
+        logout_token,
+        claims_cls=None,
+        leeway=120,
+    ):
+        """Asynchronous variant of :meth:`OpenIDMixin.parse_logout_token`.
+
+        Validates a back-channel logout token posted by the OP and returns
+        its validated claims. Use the ``sub`` and/or ``sid`` claims to clear
+        the matching local sessions.
+        """
+        metadata = await self.load_server_metadata()
+        issuer = metadata.get("issuer")
+        alg_values = _get_id_token_algorithms(metadata)
+
+        if claims_cls is None:
+            claims_cls = LogoutTokenClaims
+
+        jwks = await self.fetch_jwk_set()
+        key_set = KeySet.import_key_set(jwks)
+        try:
+            return validate_logout_token(
+                logout_token,
+                key_set=key_set,
+                client_id=self.client_id,
+                issuer=issuer,
+                algorithms=alg_values,
+                leeway=leeway,
+                claims_cls=claims_cls,
+            )
+        except InvalidKeyIdError:
+            if not metadata.get("jwks_uri") or not _may_refresh_jwk_set(self):
+                raise
+
+            jwks = await self.fetch_jwk_set(force=True)
+            key_set = KeySet.import_key_set(jwks)
+            return validate_logout_token(
+                logout_token,
+                key_set=key_set,
+                client_id=self.client_id,
+                issuer=issuer,
+                algorithms=alg_values,
+                leeway=leeway,
+                claims_cls=claims_cls,
+            )

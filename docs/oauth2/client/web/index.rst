@@ -745,6 +745,40 @@ for detailed examples:
 - :ref:`django_client`
 - :ref:`starlette_client`
 
+Back-Channel Logout
+-------------------
+
+`OpenID Connect Back-Channel Logout`_ is the server-to-server variant: the
+provider posts a signed logout token to your ``backchannel_logout_uri`` when a
+session ends, instead of redirecting the user's browser. Authlib verifies the
+token for you; your callback clears the matching sessions:
+
+.. skip: next
+
+.. code-block:: python
+
+    def clear_sessions(claims):
+        if claims.get("sid") is not None:
+            # Terminate the local session that carries this session ID.
+            clear_session_by_sid(claims["sid"])
+        else:
+            # No sid: terminate every session of this user, on all devices.
+            clear_user_sessions(claims["sub"])
+
+    # Flask:
+    response = client.handle_backchannel_logout(clear_sessions)
+    # Django:
+    response = client.handle_backchannel_logout(request, clear_sessions)
+    # Starlette (await):
+    response = await client.handle_backchannel_logout(request, clear_sessions)
+
+The response is ``200`` with an empty JSON object on success. Invalid tokens
+produce the ``400`` (``invalid_request``) and ``401`` (``invalid_token``)
+error responses defined by the specification. The full validation rules and
+the replay protection guidance are in :ref:`specs/backchannel`.
+
+.. _OpenID Connect Back-Channel Logout: https://openid.net/specs/openid-connect-backchannel-1_0.html
+
 .. toctree::
     :maxdepth: 1
 

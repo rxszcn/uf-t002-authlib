@@ -1,4 +1,5 @@
 from flask import g
+from flask import jsonify
 from flask import redirect
 from flask import request
 from flask import session
@@ -8,6 +9,7 @@ from ..base_client import OAuth1Mixin
 from ..base_client import OAuth2Mixin
 from ..base_client import OAuthError
 from ..base_client import OpenIDMixin
+from ..base_client.backchannel import get_logout_token_from_form
 from ..requests_client import OAuth1Session
 from ..requests_client import OAuth2Session
 
@@ -120,6 +122,54 @@ class FlaskOAuth2App(FlaskAppMixin, OAuth2Mixin, OpenIDMixin, BaseApp):
 
         self.framework.clear_state_data(session, state)
         return state_data
+
+    def handle_backchannel_logout(self, on_logout):
+        """Handle an OIDC Back-Channel Logout request.
+
+        Register a Flask view on the ``backchannel_logout_uri`` you gave to
+        the OpenID Provider, and call this method from it::
+
+            @app.route("/backchannel-logout", methods=["POST"])
+            def backchannel_logout():
+                def clear_sessions(claims):
+                    if claims.get("sid"):
+                        clear_session_by_sid(claims["sid"])
+                    else:
+                        clear_user_sessions(claims["sub"])
+
+                return oauth.sso.handle_backchannel_logout(clear_sessions)
+
+        The logout token is verified with the OP JWKS, and all the checks of
+        the Back-Channel Logout specification are performed. ``on_logout`` is
+        then called with the validated claims. It receives a mapping with a
+        ``sub`` and/or a ``sid``:
+
+        - with a ``sid``, terminate the local session that carries this
+          session ID;
+        - without a ``sid``, terminate every local session of the user
+          identified by ``sub`` — this is the same account on all devices.
+
+        :param on_logout: A callable taking the validated logout token
+            claims. It performs the actual session cleanup. Exceptions it
+            raises propagate to the Flask error handling.
+        :return: A Flask response. ``200`` with an empty JSON object on
+            success, or the error response required by the specification
+            (``400``, ``401``, ``429`` or ``501``).
+        """
+        from authlib.oidc.backchannel.errors import BackchannelLogoutError
+
+        try:
+            logout_token = get_logout_token_from_form(request.form)
+            claims = self.parse_logout_token(logout_token)
+            on_logout(claims)
+        except BackchannelLogoutError as error:
+            status, body, _headers = error()
+            return jsonify(body), status
+
+        # backchannel §2.3: "the RP SHOULD return an HTTP 200 status code
+        # with an empty JSON object or no content in the HTTP response
+        # message body".
+        return jsonify({}), 200
 
     def authorize_access_token(self, **kwargs):
         """Fetch access token in one step.

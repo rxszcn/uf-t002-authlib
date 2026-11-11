@@ -1,4 +1,7 @@
+import inspect
+
 from starlette.datastructures import URL
+from starlette.responses import JSONResponse
 from starlette.responses import RedirectResponse
 
 from ..base_client import BaseApp
@@ -6,6 +9,7 @@ from ..base_client import OAuthError
 from ..base_client.async_app import AsyncOAuth1Mixin
 from ..base_client.async_app import AsyncOAuth2Mixin
 from ..base_client.async_openid import AsyncOpenIDMixin
+from ..base_client.backchannel import get_logout_token_from_form
 from ..httpx_client import AsyncOAuth1Client
 from ..httpx_client import AsyncOAuth2Client
 
@@ -103,6 +107,60 @@ class StarletteOAuth2App(
 
         await self.framework.clear_state_data(request.session, state)
         return state_data
+
+    async def handle_backchannel_logout(self, request, on_logout):
+        """Handle an OIDC Back-Channel Logout request.
+
+        Register a Starlette route on the ``backchannel_logout_uri`` you gave
+        to the OpenID Provider, and call this method from it::
+
+            async def backchannel_logout(request):
+                def clear_sessions(claims):
+                    if claims.get("sid"):
+                        clear_session_by_sid(claims["sid"])
+                    else:
+                        clear_user_sessions(claims["sub"])
+
+                return await oauth.sso.handle_backchannel_logout(
+                    request, clear_sessions
+                )
+
+
+            app.add_route("/backchannel-logout", backchannel_logout, methods=["POST"])
+
+        The logout token is verified with the OP JWKS, and all the checks of
+        the Back-Channel Logout specification are performed. ``on_logout`` is
+        then called with the validated claims. It may be a regular function or
+        an async function. It receives a mapping with a ``sub`` and/or a
+        ``sid``:
+
+        - with a ``sid``, terminate the local session that carries this
+          session ID;
+        - without a ``sid``, terminate every local session of the user
+          identified by ``sub`` — this is the same account on all devices.
+
+        :param request: HTTP request instance from the Starlette view.
+        :param on_logout: A callable or async callable taking the validated
+            logout token claims. It performs the actual session cleanup.
+        :return: A Starlette ``JSONResponse``. ``200`` with an empty JSON
+            object on success, or the error response required by the
+            specification (``400``, ``401``, ``429`` or ``501``).
+        """
+        from authlib.oidc.backchannel.errors import BackchannelLogoutError
+
+        try:
+            async with request.form() as form:
+                logout_token = get_logout_token_from_form(form)
+
+            claims = await self.parse_logout_token(logout_token)
+            result = on_logout(claims)
+            if inspect.isawaitable(result):
+                await result
+        except BackchannelLogoutError as error:
+            status, body, _headers = error()
+            return JSONResponse(body, status_code=status)
+
+        return JSONResponse({}, status_code=200)
 
     async def authorize_access_token(self, request, **kwargs):
         if request.scope.get("method", "GET") == "GET":

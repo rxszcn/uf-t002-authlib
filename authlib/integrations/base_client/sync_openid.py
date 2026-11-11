@@ -7,6 +7,8 @@ from joserfc.jws import JWSRegistry
 
 from authlib.common.security import generate_token
 from authlib.common.urls import add_params_to_uri
+from authlib.oidc.backchannel.validator import LogoutTokenClaims
+from authlib.oidc.backchannel.validator import validate_logout_token
 from authlib.oidc.core import CodeIDToken
 from authlib.oidc.core import ImplicitIDToken
 from authlib.oidc.core import UserInfo
@@ -173,3 +175,63 @@ class OpenIDMixin:
 
         url = add_params_to_uri(end_session_endpoint, params)
         return {"url": url, "state": state}
+
+    def parse_logout_token(
+        self,
+        logout_token,
+        claims_cls=None,
+        leeway=120,
+    ):
+        """Validate a back-channel logout token posted by the OP.
+
+        This is the Relying Party side of OIDC Back-Channel Logout 1.0. The
+        signature is verified with the OP JWKS, and all the checks of the
+        specification are performed. On success, the validated claims are
+        returned; use their ``sub`` and/or ``sid`` to clear the matching
+        local sessions. A ``sub`` identifies all the sessions of the user,
+        a ``sid`` identifies one OP session shared by several RPs.
+
+        :param logout_token: The JWT from the ``logout_token`` form
+            parameter of the back-channel logout request.
+        :param claims_cls: A :class:`~authlib.oidc.backchannel.validator.LogoutTokenClaims`
+            subclass, to customize a validation rule.
+        :param leeway: Clock drift tolerance, in seconds.
+        :returns: The validated :class:`~authlib.oidc.backchannel.validator.LogoutTokenClaims`.
+        :raises InvalidLogoutTokenSignatureError: If the signature cannot be
+            verified (HTTP 401).
+        :raises InvalidLogoutTokenError: If a claim is invalid (HTTP 400).
+        """
+        metadata = self.load_server_metadata()
+        issuer = metadata.get("issuer")
+        alg_values = _get_id_token_algorithms(metadata)
+
+        if claims_cls is None:
+            claims_cls = LogoutTokenClaims
+
+        key_set = KeySet.import_key_set(self.fetch_jwk_set())
+        try:
+            return validate_logout_token(
+                logout_token,
+                key_set=key_set,
+                client_id=self.client_id,
+                issuer=issuer,
+                algorithms=alg_values,
+                leeway=leeway,
+                claims_cls=claims_cls,
+            )
+        except InvalidKeyIdError:
+            # The OP may have rotated its signing keys. Refresh the JWKS once,
+            # like parse_id_token does, before giving up.
+            if not metadata.get("jwks_uri") or not _may_refresh_jwk_set(self):
+                raise
+
+            key_set = KeySet.import_key_set(self.fetch_jwk_set(force=True))
+            return validate_logout_token(
+                logout_token,
+                key_set=key_set,
+                client_id=self.client_id,
+                issuer=issuer,
+                algorithms=alg_values,
+                leeway=leeway,
+                claims_cls=claims_cls,
+            )
